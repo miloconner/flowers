@@ -133,7 +133,7 @@ pub fn update_bees(
         let mut closest = i32::MAX;
         bee.target = None;
         for (cell, role) in &cells {
-            if *role != PCellRole::Leaf {
+            if !matches!(*role, PCellRole::Flower(_)) {
                 continue;
             }
             let dis = cell.grid - bee.grid;
@@ -351,6 +351,7 @@ fn main() {
                 check_suffocation,
                 wilt_cells,
                 bloom_cells,
+                update_bees,
             )
                 .chain(),
         )
