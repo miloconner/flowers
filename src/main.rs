@@ -328,6 +328,7 @@ fn main() {
                 check_suffocation,
                 wilt_cells,
                 bloom_cells,
+                flower_update,
                 hives::bee_foraging_and_building,
             )
                 .chain(),

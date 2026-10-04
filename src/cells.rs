@@ -373,6 +373,8 @@ pub fn bloom_cells(
                 }
             }
             PCellRole::Flower(color) => {
+                // A flower must never instantly re-bloom if it reverts to a leaf.
+                cell.leaf_age = 0.0;
                 centers.insert(cell.grid, (entity, Some(color)));
             }
             _ => cell.leaf_age = 0.0,
@@ -387,11 +389,8 @@ pub fn bloom_cells(
         .iter()
         .filter_map(|(&position, &(_, color))| color.is_none().then_some(position))
         .collect();
-    // Stable tie-breaking for flowers that bloom in the same frame.
     starts.sort_by_key(|p| (p.y, p.x));
     for center in starts {
-        // Inherit from the nearest overlapping flower, without merging colors.
-        // Equal distances prefer the lower y, then lower x coordinate.
         let mut neighbors = Vec::new();
         for y in -2..=2 {
             for x in -2..=2 {
@@ -431,16 +430,16 @@ pub fn bloom_cells(
                         if matches!(*old_role, PCellRole::Flower(_) | PCellRole::Petal(_)) {
                             continue;
                         }
+                        // Existing leaf converts in place; occupancy is untouched.
                         commands.entity(entity).insert(FlowerBase(*old_role));
                         *old_role = role;
                         cell.target = None;
                         cell.flower_age = 0.0;
+                        cell.leaf_age = 0.0;
                         cell.wilt = None;
                         sprite.color = role.color();
                     }
                 } else if occupied.positions.insert(position) {
-                    // Empty petal tiles belong to their center, so branch
-                    // removal also removes these petals and their occupancy.
                     commands.entity(parent).with_children(|children| {
                         children
                             .spawn(pcell_bundle(
@@ -449,11 +448,70 @@ pub fn bloom_cells(
                                 position,
                                 false,
                             ))
-                            // A petal grown into empty space leaves a leaf behind.
                             .insert(FlowerBase(PCellRole::Leaf));
                     });
                 }
             }
+        }
+    }
+}
+
+pub fn flower_update(mut cells: Query<(&PCell, &mut PCellRole, &mut Sprite)>) {
+    let mut centers: HashMap<IVec2, Color> = HashMap::new();
+    for (cell, role, _) in &cells {
+        if let PCellRole::Flower(color) = *role {
+            centers.insert(cell.grid, color);
+        }
+    }
+    if centers.len() < 2 {
+        return;
+    }
+
+    let mut order: Vec<IVec2> = centers.keys().copied().collect();
+    order.sort_by_key(|p| (p.y, p.x));
+
+    let mut seen: HashSet<IVec2> = HashSet::new();
+    let mut changes: Vec<(IVec2, Color, Color)> = Vec::new();
+    for &root in &order {
+        if !seen.insert(root) {
+            continue;
+        }
+        let root_color = centers[&root];
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            let current_color = centers[&current];
+            if current_color != root_color {
+                changes.push((current, current_color, root_color));
+            }
+            for y in -2..=2 {
+                for x in -2..=2 {
+                    let next = current + IVec2::new(x, y);
+                    if centers.contains_key(&next) && seen.insert(next) {
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+    }
+    if changes.is_empty() {
+        return;
+    }
+
+    for (center, old_color, new_color) in changes {
+        for (cell, mut role, mut sprite) in &mut cells {
+            let d = cell.grid - center;
+            if d.x.abs() > 1 || d.y.abs() > 1 {
+                continue;
+            }
+            let new_role = match *role {
+                PCellRole::Flower(_) if d == IVec2::ZERO => PCellRole::Flower(new_color),
+                PCellRole::Petal(c) if d != IVec2::ZERO && c == old_color => {
+                    PCellRole::Petal(new_color)
+                }
+                _ => continue,
+            };
+            *role = new_role;
+            sprite.color = new_role.color();
         }
     }
 }
