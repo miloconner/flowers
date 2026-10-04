@@ -1,5 +1,6 @@
 mod cells;
 mod hives;
+mod rabbits;
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -312,6 +313,7 @@ fn main() {
                 setup,
                 hives::generate_initial_hives,
                 hives::spawn_initial_bees,
+                rabbits::spawn_initial_rabbits
             )
                 .chain(),
         )
@@ -329,6 +331,8 @@ fn main() {
                 wilt_cells,
                 bloom_cells,
                 hives::bee_foraging_and_building,
+                rabbits::rabbit_ai,
+                rabbits::rabbit_mating
             )
                 .chain(),
         )

@@ -115,6 +115,21 @@ pub enum PCellRole {
     Petal(Color),
 }
 
+pub(crate) fn revert_flower(
+    commands: &mut Commands,
+    entity: Entity,
+    cell: &mut PCell,
+    role: &mut PCellRole,
+    base: Option<&FlowerBase>,
+) {
+    *role = base.map_or(PCellRole::Leaf, |b| b.0);
+    cell.flower_age = 0.0;
+    cell.leaf_age = 0.0; // restarts the bloom timer, so regrowth takes FLOWER_DELAY
+    cell.wilt = None;
+    cell.target = None;
+    commands.entity(entity).remove::<(FlowerBase, Pollinated)>();
+}
+
 impl PCellRole {
     pub(crate) fn color(self) -> Color {
         match self {

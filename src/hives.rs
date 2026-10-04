@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     CELLSIZE, Environment,
     cells::{PCell, PCellRole, Pollinated},
+    rabbits::spawn_rabbit
 };
 
 const SIDES: [IVec2; 4] = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
@@ -23,7 +24,7 @@ const SPAWN_NOISE_SCALE: f64 = 0.035;
 const MAX_SPAWN_CHANCE: f64 = 0.02;
 
 const BEE_RANGE: i32 = 100;
-const INITIAL_BEE_COUNT: usize = 5;
+const INITIAL_BEE_COUNT: usize = 15;
 const BEE_Z: f32 = 2.0;
 const HIVE_Z: f32 = 0.5;
 const INSIDE_HIVE_Z: f32 = 0.2;
@@ -297,7 +298,7 @@ impl Hive {
                         && self.built.contains(&(p - IVec2::X)))
                         || (self.built.contains(&(p + IVec2::Y))
                             && self.built.contains(&(p - IVec2::Y)));
-                    // Distance keeps the early blob compact; support fills dents.
+                    // compact with filled dents (from online)
                     let distance = (p - self.origin).as_vec2().length();
                     let score =
                         sides as f32 * 5.0 + diagonals as f32 * 2.0 + if dent { 8.0 } else { 0.0 }
@@ -501,6 +502,11 @@ pub(crate) fn bee_foraging_and_building(
                     }
                     if hive.built.len() >= hive.plan.len() {
                         finished_origin = Some(hive.origin);
+                        for _ in 0..2 {
+                            let spot = hive.plan.iter().copied().collect::<Vec<_>>();
+                            let grid = spot[rng.random_range(0..spot.len())];
+                            spawn_rabbit(&mut commands, grid);
+                        }
                     }
                 }
                 if let Some(origin) = finished_origin {
