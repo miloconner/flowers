@@ -3,11 +3,12 @@ use rand::RngExt;
 use rand::rng;
 use std::collections::{HashMap, HashSet};
 
-use crate::{CELLSIZE, Environment};
+use crate::{CELLSIZE, Environment, fire::Burning};
 
 const BRANCE: f64 = 0.15;
 const RANCE: f64 = 0.1;
 const FLOWER_DELAY: f32 = 5.0;
+const PLANT_GROWTH_SPEED: f32 = 0.5;
 const FLOWER_GRACE_PERIOD: f32 = 20.0;
 const WILT_DURATION: f32 = 6.0;
 const CLOUD_KILLING: bool = false;
@@ -18,7 +19,7 @@ const STEM_COLOR: Color = Color::srgb(0.12, 0.42, 0.16);
 const LEAF_COLOR: Color = Color::srgb(0.24, 0.72, 0.25);
 const ROOT_COLOR: Color = Color::srgb(0.6, 0.33, 0.0);
 pub const FLOWER_CENTER_COLOR: Color = Color::srgb(1.0, 0.85, 0.0);
-pub const FLOWERWHITE: Color = Color::srgb(1.0,1.0,1.0);
+pub const FLOWERWHITE: Color = Color::srgb(1.0, 1.0, 1.0);
 const WILT_GRAY_COLOR: Color = Color::srgb(0.70, 0.70, 0.65);
 
 fn growth_score(
@@ -175,12 +176,12 @@ pub fn grow_cells(
     mut commands: Commands,
     time: Res<Time>,
     environment: Res<Environment>,
-    mut cells: Query<(Entity, &mut PCell, &mut PCellRole)>,
+    mut cells: Query<(Entity, &mut PCell, &mut PCellRole), Without<Burning>>,
     mut occupied: ResMut<Occupied>,
 ) {
     let mut rng = rng();
     for (entity, mut cell, mut role) in &mut cells {
-        cell.growth += time.delta_secs();
+        cell.growth += time.delta_secs() * PLANT_GROWTH_SPEED;
         if cell.blocker || matches!(*role, PCellRole::Flower(_) | PCellRole::Petal(_)) {
             continue;
         }
@@ -252,7 +253,7 @@ pub fn grow_cells(
 }
 
 pub fn update_cells(
-    mut cells: Query<(&mut PCell, &mut Sprite, &PCellRole,Has<Pollinated>)>,
+    mut cells: Query<(&mut PCell, &mut Sprite, &PCellRole, Has<Pollinated>), Without<Burning>>,
     mut occupied: ResMut<Occupied>,
     environment: Res<Environment>,
 ) {
@@ -315,7 +316,12 @@ pub fn check_suffocation(
     mut cells: Query<(Entity, &PCell, &mut PCellRole)>,
     children_query: Query<&Children>,
     child_of_query: Query<&ChildOf>,
+    burning: Query<(), With<Burning>>,
 ) {
+    // Do not prune whole branches while individual cells are burning.
+    if !burning.is_empty() {
+        return;
+    }
     let mut to_kill = Vec::new();
     for (entity, cell, role) in cells.iter() {
         if *role != PCellRole::Stem {
@@ -375,7 +381,7 @@ pub fn bloom_cells(
     time: Res<Time>,
     environment: Res<Environment>,
     mut occupied: ResMut<Occupied>,
-    mut cells: Query<(Entity, &mut PCell, &mut PCellRole, &mut Sprite)>,
+    mut cells: Query<(Entity, &mut PCell, &mut PCellRole, &mut Sprite), Without<Burning>>,
 ) {
     let mut centers = HashMap::new();
     let mut positions = HashMap::new();
@@ -479,13 +485,16 @@ pub fn wilt_cells(
     mut commands: Commands,
     time: Res<Time>,
     environment: Res<Environment>,
-    mut cells: Query<(
-        Entity,
-        &mut PCell,
-        &mut PCellRole,
-        &mut Sprite,
-        Option<&FlowerBase>,
-    )>,
+    mut cells: Query<
+        (
+            Entity,
+            &mut PCell,
+            &mut PCellRole,
+            &mut Sprite,
+            Option<&FlowerBase>,
+        ),
+        Without<Burning>,
+    >,
 ) {
     if !CLOUD_KILLING {
         return;

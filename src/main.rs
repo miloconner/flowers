@@ -1,9 +1,12 @@
 mod cells;
+mod fire;
+mod fireflies;
 mod hives;
+mod lighting;
 mod rabbits;
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{PrimaryWindow, WindowResolution};
 use cells::*;
 use noise::{NoiseFn, OpenSimplex};
 use rand::RngExt;
@@ -17,19 +20,20 @@ const SWAY: f64 = 0.03;
 const NSCALE: f64 = 0.005;
 const SUN_THRESHOLD: f64 = -0.1;
 const RAIN_CLOUD_THRESHOLD: f64 = -0.3;
+const NIGHT_RAIN_CLOUD_THRESHOLD: f64 = 0.0;
 const RAIN_SPLASH_ROLL_INTERVAL: f32 = 0.1;
-const RAIN_SPLASH_CHANCE_PER_TILE_PER_ROLL: f64 = 0.00005;
-const RAIN_SPLASH_START_ALPHA: f32 = 0.03;
+const RAIN_SPLASH_CHANCE_PER_TILE_PER_ROLL: f64 = 0.0003;
+const RAIN_SPLASH_START_ALPHA: f32 = 0.1;
 const RAIN_WATER_AMOUNT: f32 = 1.0;
+const INITIAL_ROOT_COUNT: usize = 10;
 const WATER_UPDATE_INTERVAL: f32 = 0.1;
 const WATER_EVAPORATION_PER_TICK: f32 = 0.002;
-const WATER_SPREAD_FRACTION_PER_TICK: f32 = 0.02;
+const WATER_SPREAD_FRACTION_PER_TICK: f32 = 0.06;
 const WATER_MIN_SPREAD_AMOUNT: f32 = 0.08;
-const WATER_MIN_AMOUNT: f32 = 0.001;
+const WATER_MIN_AMOUNT: f32 = 0.01;
 
 const ORGANISM_COLOR: Color = Color::srgb(0.2, 0.7, 1.0);
 const DIRT_COLOR: Color = Color::srgb(0.35, 0.2, 0.08);
-const SUNLIGHT_COLOR: Color = Color::srgb(1.0, 1.0, 0.0);
 const SHADOW_COLOR: Color = Color::srgb(0.0, 0.0, 0.0);
 const RAIN_SPLASH_COLOR: Color = Color::srgb(0.15, 0.55, 1.0);
 
@@ -46,6 +50,20 @@ struct WaterField {
     amounts: HashMap<IVec2, f32>,
     entities: HashMap<IVec2, Entity>,
     elapsed: f32,
+}
+
+#[derive(Resource)]
+struct SimulationPaused(bool);
+
+fn toggle_pause(keys: Res<ButtonInput<KeyCode>>, mut paused: ResMut<SimulationPaused>) {
+    if keys.just_pressed(KeyCode::KeyP) {
+        paused.0 = !paused.0;
+        info!("Simulation {}", if paused.0 { "paused" } else { "running" });
+    }
+}
+
+fn simulation_running(paused: Res<SimulationPaused>) -> bool {
+    !paused.0
 }
 
 fn light_value(n: &OpenSimplex, x: i32, y: i32, t: f64) -> f64 {
@@ -116,27 +134,53 @@ fn origin_transform() -> Transform {
     Transform::from_xyz(0.0, 0.0, 0.0)
 }
 
-fn animate_light(
-    time: Res<Time>,
-    noise: Res<LightNoise>,
-    mut env: ResMut<Environment>,
-    mut tiles: Query<(&LightTile, &mut Sprite)>,
+// Startup and rain use exactly the same plant hierarchy and initial cell state.
+pub(crate) fn spawn_root_plant(
+    commands: &mut Commands,
+    occupied: &mut Occupied,
+    environment: &Environment,
+    grid: IVec2,
+) -> bool {
+    if !environment.inside(grid)
+        || !environment.get(grid).dirt
+        || occupied.positions.contains(&grid)
+    {
+        return false;
+    }
+    commands
+        .spawn((
+            Plant,
+            Transform::from_xyz(grid.x as f32 * CELLSIZE, grid.y as f32 * CELLSIZE, 0.0),
+            Visibility::default(),
+        ))
+        .with_children(|plant| {
+            spawn_pcell(plant, PCellRole::Root, Vec2::ZERO, grid, occupied, false);
+        });
+    true
+}
+
+fn respawn_plants_when_empty(
+    mut commands: Commands,
+    environment: Res<Environment>,
+    mut occupied: ResMut<Occupied>,
+    plants: Query<(), With<PCell>>,
 ) {
-    let t = time.elapsed_secs_f64();
-    let env = &mut *env;
+    if !plants.is_empty() {
+        return;
+    }
 
-    for (tile, mut sprite) in &mut tiles {
-        let l = light_value(&noise.0, tile.grid.x, tile.grid.y, t);
-
-        if l > 0.4 {
-            sprite.color = SUNLIGHT_COLOR.with_alpha(0.01 * l as f32);
-        } else {
-            sprite.color = SHADOW_COLOR.with_alpha(shade(l));
-        }
-
-        if let Some(e) = env.tiles.get_mut(&tile.grid) {
-            e.light = ((l + 1.0) / 2.0) as f32;
-            e.sun = l > SUN_THRESHOLD;
+    occupied.positions.clear();
+    let mut rng = rng();
+    let mut spawned = 0;
+    let mut attempts = 0;
+    while spawned < INITIAL_ROOT_COUNT && attempts < INITIAL_ROOT_COUNT * 1000 {
+        attempts += 1;
+        let grid = IVec2::new(
+            rng.random_range(environment.min.x..=environment.max.x),
+            rng.random_range(environment.min.y..=environment.max.y),
+        );
+        if spawn_root_plant(&mut commands, &mut occupied, &environment, grid) {
+            spawned += 1;
         }
     }
 }
@@ -144,6 +188,7 @@ fn animate_light(
 fn spawn_rain_splashes(
     time: Res<Time>,
     noise: Res<LightNoise>,
+    cycle: Res<lighting::DayNightCycle>,
     mut clock: ResMut<RainClock>,
     mut water: ResMut<WaterField>,
     environment: Res<Environment>,
@@ -151,11 +196,13 @@ fn spawn_rain_splashes(
 ) {
     clock.elapsed += time.delta_secs();
     let now = time.elapsed_secs_f64();
+    let rain_threshold = NIGHT_RAIN_CLOUD_THRESHOLD
+        + (RAIN_CLOUD_THRESHOLD - NIGHT_RAIN_CLOUD_THRESHOLD) * f64::from(cycle.daylight());
 
     let rainy_positions: Vec<_> = light_tiles
         .iter()
         .filter_map(|tile| {
-            (light_value(&noise.0, tile.grid.x, tile.grid.y, now) < RAIN_CLOUD_THRESHOLD)
+            (light_value(&noise.0, tile.grid.x, tile.grid.y, now) < rain_threshold)
                 .then_some(tile.grid)
         })
         .collect();
@@ -300,28 +347,46 @@ fn update_water(
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                resolution: WindowResolution::new(1200, 800),
+                ..default()
+            }),
+            ..default()
+        }))
         // .insert_resource(Environment {sun: true, dirt: false})
         .insert_resource(Occupied::default())
         .insert_resource(RainClock::default())
         .insert_resource(WaterField::default())
+        .insert_resource(SimulationPaused(true))
         .init_resource::<hives::HiveState>()
         .init_resource::<hives::BeeSpeed>()
+        .init_resource::<lighting::DayNightCycle>()
+        .init_resource::<fire::LightningStorm>()
+        .init_resource::<fire::FireNoise>()
         .add_systems(
             Startup,
             (
                 setup,
                 hives::generate_initial_hives,
                 hives::spawn_initial_bees,
-                rabbits::spawn_initial_rabbits
+                rabbits::spawn_initial_rabbits,
             )
                 .chain(),
         )
-        .add_systems(Update, hives::spawn_bee_on_click)
+        .add_systems(Update, hives::spawn_bee_on_click.run_if(simulation_running))
+        .add_systems(Update, toggle_pause)
         .add_systems(
             Update,
             (
-                animate_light,
+                lighting::advance_day_night,
+                fireflies::update_fireflies,
+                fire::night_lightning,
+                fire::update_fire,
+                fire::fade_lightning,
+                fire::clean_burnt_branches,
+                respawn_plants_when_empty,
+                lighting::animate_light,
                 spawn_rain_splashes,
                 update_water,
                 hives::bee_speed_controls,
@@ -332,9 +397,10 @@ fn main() {
                 bloom_cells,
                 hives::bee_foraging_and_building,
                 rabbits::rabbit_ai,
-                rabbits::rabbit_mating
+                rabbits::rabbit_mating,
             )
-                .chain(),
+                .chain()
+                .run_if(simulation_running),
         )
         .run();
 }
@@ -358,8 +424,8 @@ fn setup(
         max: IVec2::new(hx, hy),
     };
 
-    let lnoise = OpenSimplex::new(21345);
-    let dperlin = OpenSimplex::new(68292);
+    let lnoise = OpenSimplex::new(25315);
+    let dperlin = OpenSimplex::new(67292);
 
     for x in env.min.x..=env.max.x {
         for y in env.min.y..=env.max.y {
@@ -406,40 +472,15 @@ fn setup(
     let mut rng = rng();
     let mut roots_spawned = 0;
 
-    while roots_spawned < 10 {
+    while roots_spawned < INITIAL_ROOT_COUNT {
         let root_pos = IVec2::new(
             rng.random_range(env.min.x..=env.max.x),
             rng.random_range(env.min.y..=env.max.y),
         );
 
-        if !env.get(root_pos).dirt || occupied.positions.contains(&root_pos) {
-            continue;
+        if spawn_root_plant(&mut commands, &mut occupied, &env, root_pos) {
+            roots_spawned += 1;
         }
-
-        let world_pos = Vec3::new(
-            root_pos.x as f32 * CELLSIZE,
-            root_pos.y as f32 * CELLSIZE,
-            0.0,
-        );
-
-        commands
-            .spawn((
-                Plant,
-                Transform::from_translation(world_pos),
-                Visibility::default(),
-            ))
-            .with_children(|plant| {
-                spawn_pcell(
-                    plant,
-                    PCellRole::Root,
-                    Vec2::ZERO,
-                    root_pos,
-                    &mut occupied,
-                    false,
-                );
-            });
-
-        roots_spawned += 1;
     }
 
     commands.insert_resource(LightNoise(lnoise));

@@ -32,29 +32,27 @@ pub struct Rabbit {
 }
 
 pub(crate) fn spawn_rabbit(commands: &mut Commands, grid: IVec2) {
-    commands.spawn((
-        Rabbit {
-            grid,
-            target: None,
-            step_timer: 0.0,
-            eating: None,
-            hunger: 0.0,
-            mate_timer: 0.0,
-        },
-        Sprite::from_color(RABBIT_COLOR, Vec2::splat(CELLSIZE * 3.0)),
-        Transform::from_xyz(
-            grid.x as f32 * CELLSIZE,
-            grid.y as f32 * CELLSIZE,
-            RABBIT_Z,
-        ),
-    )).with_children(|r| {
-        for x in [-1.0,1.0] {
-            r.spawn((
-                Sprite::from_color(Color::BLACK, Vec2::splat(CELLSIZE)),
-                Transform::from_xyz(x*CELLSIZE, CELLSIZE, 0.1)
-            ));
-        }
-    });
+    commands
+        .spawn((
+            Rabbit {
+                grid,
+                target: None,
+                step_timer: 0.0,
+                eating: None,
+                hunger: 0.0,
+                mate_timer: 0.0,
+            },
+            Sprite::from_color(RABBIT_COLOR, Vec2::splat(CELLSIZE * 3.0)),
+            Transform::from_xyz(grid.x as f32 * CELLSIZE, grid.y as f32 * CELLSIZE, RABBIT_Z),
+        ))
+        .with_children(|r| {
+            for x in [-1.0, 1.0] {
+                r.spawn((
+                    Sprite::from_color(Color::BLACK, Vec2::splat(CELLSIZE)),
+                    Transform::from_xyz(x * CELLSIZE, CELLSIZE, 0.1),
+                ));
+            }
+        });
 }
 
 fn stand_tile(environment: &Environment, target: IVec2) -> IVec2 {
@@ -78,7 +76,16 @@ pub fn rabbit_ai(
     speed: Res<BeeSpeed>,
     environment: Res<Environment>,
     mut rabbits: Query<(Entity, &mut Rabbit, &mut Transform)>,
-    mut cells: Query<(Entity, &mut PCell, &mut PCellRole, Option<&FlowerBase>, Has<Pollinated>)>,
+    mut cells: Query<
+        (
+            Entity,
+            &mut PCell,
+            &mut PCellRole,
+            Option<&FlowerBase>,
+            Has<Pollinated>,
+        ),
+        Without<crate::fire::Burning>,
+    >,
 ) {
     let dt = time.delta_secs() * speed.0;
     let mut rng = rng();
@@ -93,8 +100,7 @@ pub fn rabbit_ai(
         .collect();
     let mut eaten: Vec<(IVec2, Color)> = Vec::new();
 
-    let mut taken: HashSet<IVec2> = 
-        rabbits.iter().filter_map(|(_,r,_)| r.target).collect();
+    let mut taken: HashSet<IVec2> = rabbits.iter().filter_map(|(_, r, _)| r.target).collect();
 
     for (entity, mut rabbit, mut transform) in &mut rabbits {
         rabbit.hunger += dt;
@@ -113,7 +119,8 @@ pub fn rabbit_ai(
         }
 
         // eat flower
-        if let Some(t) = rabbit.target && stand_tile(&environment, t) == rabbit.grid
+        if let Some(t) = rabbit.target
+            && stand_tile(&environment, t) == rabbit.grid
         {
             let left = rabbit.eating.unwrap_or(EAT_TIME) - dt;
             if left <= 0.0 {
@@ -134,7 +141,8 @@ pub fn rabbit_ai(
                 .keys()
                 .copied()
                 .filter(|p| {
-                    !taken.contains(p) && (*p - from).length_squared() <= RABBIT_RANGE * RABBIT_RANGE
+                    !taken.contains(p)
+                        && (*p - from).length_squared() <= RABBIT_RANGE * RABBIT_RANGE
                 })
                 .min_by_key(|p| (*p - from).length_squared());
             if let Some(t) = rabbit.target {

@@ -2,13 +2,13 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use noise::{NoiseFn, Perlin};
 use rand::RngExt;
-use rand::seq::{SliceRandom, IndexedRandom};
+use rand::seq::{IndexedRandom, SliceRandom};
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     CELLSIZE, Environment,
     cells::{PCell, PCellRole, Pollinated},
-    rabbits::spawn_rabbit
+    rabbits::spawn_rabbit,
 };
 
 const SIDES: [IVec2; 4] = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
@@ -29,9 +29,6 @@ const BEE_Z: f32 = 2.0;
 const HIVE_Z: f32 = 0.5;
 const INSIDE_HIVE_Z: f32 = 0.2;
 const BEE_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
-
-pub const FLOWER_CENTER_COLOR: Color = Color::srgb(1.0, 0.85, 0.0);
-pub const FLOWERWHITE: Color = Color::srgb(1.0,1.0,1.0);// copied these here for now butreally should be shared by both files
 
 fn spawn_chance(noise: &Perlin, p: IVec2) -> f64 {
     let value = noise.get([
@@ -56,7 +53,7 @@ fn warped_oval(origin: IVec2, rng: &mut impl RngExt) -> HashSet<IVec2> {
     let perlin = Perlin::new(seed);
     let strength = Vec2::new(width, height) * WARP_RATIO;
     let radius = Vec2::new(width, height) * 0.5;
-    
+
     let extent = (radius + strength + Vec2::ONE).ceil().as_ivec2();
     let mut mask = HashSet::new();
     for y in -extent.y..=extent.y {
@@ -412,7 +409,13 @@ impl HiveState {
 }
 
 /// Teleports a bee to a random entrance of `hive` and hides it inside.
-fn enter_hive(bee: &mut Bee, transform: &mut Transform, index: usize, hive: &Hive, rng: &mut impl RngExt) {
+fn enter_hive(
+    bee: &mut Bee,
+    transform: &mut Transform,
+    index: usize,
+    hive: &Hive,
+    rng: &mut impl RngExt,
+) {
     let entrances: Vec<_> = hive.black.iter().copied().collect();
     let entrance = entrances[rng.random_range(0..entrances.len())];
     bee.grid = entrance;
@@ -430,7 +433,7 @@ pub(crate) fn bee_foraging_and_building(
     time: Res<Time>,
     speed: Res<BeeSpeed>,
     environment: Res<Environment>,
-    mut flowers: Query<(Entity, &PCell, &mut PCellRole, Has<Pollinated>)>,
+    flowers: Query<(Entity, &PCell, &PCellRole, Has<Pollinated>), Without<crate::fire::Burning>>,
     mut bee_queries: ParamSet<(Query<(&mut Bee, &mut Transform)>, Query<&mut Sprite>)>,
     mut state: ResMut<HiveState>,
 ) {
@@ -594,7 +597,6 @@ pub(crate) fn bee_foraging_and_building(
         }
     }
 
-
     // turn flower used
     // if !gathered.is_empty() {
     //     for (entity, cell, mut role) in &mut flowers {
@@ -613,7 +615,6 @@ pub(crate) fn bee_foraging_and_building(
         }
     }
     let mut sprites = bee_queries.p1();
-
 
     // reveal back entrances
     for hive in &state.hives {
