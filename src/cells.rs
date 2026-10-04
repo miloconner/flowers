@@ -17,7 +17,8 @@ const CROWDING_PENALTY: f32 = 0.08;
 const STEM_COLOR: Color = Color::srgb(0.12, 0.42, 0.16);
 const LEAF_COLOR: Color = Color::srgb(0.24, 0.72, 0.25);
 const ROOT_COLOR: Color = Color::srgb(0.6, 0.33, 0.0);
-const FLOWER_CENTER_COLOR: Color = Color::srgb(1.0, 0.85, 0.0);
+pub const FLOWER_CENTER_COLOR: Color = Color::srgb(1.0, 0.85, 0.0);
+pub const FLOWERWHITE: Color = Color::srgb(1.0,1.0,1.0);
 const WILT_GRAY_COLOR: Color = Color::srgb(0.70, 0.70, 0.65);
 
 fn growth_score(
@@ -90,6 +91,8 @@ impl Wilting {
         }
     }
 }
+#[derive(Component)]
+pub struct Pollinated;
 
 fn blend_color(from: Color, to: Color, amount: f32) -> Color {
     let from = from.to_srgba();
@@ -113,7 +116,7 @@ pub enum PCellRole {
 }
 
 impl PCellRole {
-    fn color(self) -> Color {
+    pub(crate) fn color(self) -> Color {
         match self {
             PCellRole::Stem => STEM_COLOR,
             PCellRole::Leaf => LEAF_COLOR,
@@ -234,12 +237,16 @@ pub fn grow_cells(
 }
 
 pub fn update_cells(
-    mut cells: Query<(&mut PCell, &mut Sprite, &PCellRole)>,
+    mut cells: Query<(&mut PCell, &mut Sprite, &PCellRole,Has<Pollinated>)>,
     mut occupied: ResMut<Occupied>,
     environment: Res<Environment>,
 ) {
-    for (mut cell, mut sprite, role) in &mut cells {
-        sprite.color = role.color();
+    for (mut cell, mut sprite, role, polld) in &mut cells {
+        sprite.color = if polld & matches!(*role, PCellRole::Flower(_)) {
+            FLOWERWHITE
+        } else {
+            role.color()
+        };
         if cell.blocker || matches!(*role, PCellRole::Flower(_) | PCellRole::Petal(_)) {
             continue;
         }
@@ -373,6 +380,8 @@ pub fn bloom_cells(
                 }
             }
             PCellRole::Flower(color) => {
+                // A flower must never instantly re-bloom if it reverts to a leaf.
+                cell.leaf_age = 0.0;
                 centers.insert(cell.grid, (entity, Some(color)));
             }
             _ => cell.leaf_age = 0.0,
@@ -387,11 +396,8 @@ pub fn bloom_cells(
         .iter()
         .filter_map(|(&position, &(_, color))| color.is_none().then_some(position))
         .collect();
-    // Stable tie-breaking for flowers that bloom in the same frame.
     starts.sort_by_key(|p| (p.y, p.x));
     for center in starts {
-        // Inherit from the nearest overlapping flower, without merging colors.
-        // Equal distances prefer the lower y, then lower x coordinate.
         let mut neighbors = Vec::new();
         for y in -2..=2 {
             for x in -2..=2 {
@@ -416,7 +422,6 @@ pub fn bloom_cells(
                 {
                     continue;
                 }
-                // Reserve other centers, including leaves blooming this frame.
                 if position != center && centers.contains_key(&position) {
                     continue;
                 }
@@ -427,7 +432,6 @@ pub fn bloom_cells(
                 };
                 if let Some(&entity) = positions.get(&position) {
                     if let Ok((_, mut cell, mut old_role, mut sprite)) = cells.get_mut(entity) {
-                        // First bloom owns the tile: never repaint an existing flower.
                         if matches!(*old_role, PCellRole::Flower(_) | PCellRole::Petal(_)) {
                             continue;
                         }
@@ -435,12 +439,11 @@ pub fn bloom_cells(
                         *old_role = role;
                         cell.target = None;
                         cell.flower_age = 0.0;
+                        cell.leaf_age = 0.0;
                         cell.wilt = None;
                         sprite.color = role.color();
                     }
                 } else if occupied.positions.insert(position) {
-                    // Empty petal tiles belong to their center, so branch
-                    // removal also removes these petals and their occupancy.
                     commands.entity(parent).with_children(|children| {
                         children
                             .spawn(pcell_bundle(
@@ -449,7 +452,6 @@ pub fn bloom_cells(
                                 position,
                                 false,
                             ))
-                            // A petal grown into empty space leaves a leaf behind.
                             .insert(FlowerBase(PCellRole::Leaf));
                     });
                 }
@@ -504,7 +506,7 @@ pub fn wilt_cells(
                 cell.leaf_age = 0.0;
                 cell.wilt = None;
                 cell.target = None;
-                commands.entity(entity).remove::<FlowerBase>();
+                commands.entity(entity).remove::<(FlowerBase, Pollinated)>();
             }
         }
     }

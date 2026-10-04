@@ -2,12 +2,12 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use noise::{NoiseFn, Perlin};
 use rand::RngExt;
-use rand::seq::SliceRandom;
+use rand::seq::{SliceRandom, IndexedRandom};
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     CELLSIZE, Environment,
-    cells::{PCell, PCellRole},
+    cells::{PCell, PCellRole, Pollinated},
 };
 
 const SIDES: [IVec2; 4] = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
@@ -18,7 +18,7 @@ const OVAL_MEAN: f32 = 11.0;
 const OVAL_STD_DEV: f32 = 2.0;
 const WARP_RATIO: f32 = 0.18;
 const NOISE_FREQUENCY: f64 = 2.0;
-// World-space tiles: broad patches of high/low spawn likelihood.
+
 const SPAWN_NOISE_SCALE: f64 = 0.035;
 const MAX_SPAWN_CHANCE: f64 = 0.02;
 
@@ -28,6 +28,9 @@ const BEE_Z: f32 = 2.0;
 const HIVE_Z: f32 = 0.5;
 const INSIDE_HIVE_Z: f32 = 0.2;
 const BEE_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
+
+pub const FLOWER_CENTER_COLOR: Color = Color::srgb(1.0, 0.85, 0.0);
+pub const FLOWERWHITE: Color = Color::srgb(1.0,1.0,1.0);// copied these here for now butreally should be shared by both files
 
 fn spawn_chance(noise: &Perlin, p: IVec2) -> f64 {
     let value = noise.get([
@@ -39,7 +42,7 @@ fn spawn_chance(noise: &Perlin, p: IVec2) -> f64 {
 }
 
 fn oval_dimension(rng: &mut impl RngExt) -> f32 {
-    // Box–Muller normal sample; dimensions are full diameters in tiles.
+    // makes a random oval shapeS
     let u: f32 = rng.random_range(f32::EPSILON..1.0);
     let angle: f32 = rng.random_range(0.0..std::f32::consts::TAU);
     (OVAL_MEAN + OVAL_STD_DEV * (-2.0 * u.ln()).sqrt() * angle.cos()).max(3.0)
@@ -52,7 +55,7 @@ fn warped_oval(origin: IVec2, rng: &mut impl RngExt) -> HashSet<IVec2> {
     let perlin = Perlin::new(seed);
     let strength = Vec2::new(width, height) * WARP_RATIO;
     let radius = Vec2::new(width, height) * 0.5;
-    // Pad the sampling region so outward warps aren't clipped at the bounds.
+    
     let extent = (radius + strength + Vec2::ONE).ceil().as_ivec2();
     let mut mask = HashSet::new();
     for y in -extent.y..=extent.y {
@@ -68,7 +71,7 @@ fn warped_oval(origin: IVec2, rng: &mut impl RngExt) -> HashSet<IVec2> {
             }
         }
     }
-    // Pixel warping can leave detached specks: keep the largest cardinal blob.
+
     let mut largest = HashSet::new();
     while let Some(&start) = mask.iter().next() {
         let mut component = HashSet::from([start]);
@@ -87,7 +90,7 @@ fn warped_oval(origin: IVec2, rng: &mut impl RngExt) -> HashSet<IVec2> {
             largest = component;
         }
     }
-    // Place the topmost tile at the construction origin.
+    // top goes at origin
     let anchor = largest
         .iter()
         .copied()
@@ -180,7 +183,7 @@ pub(crate) struct BeeSpeed(pub f32);
 
 impl Default for BeeSpeed {
     fn default() -> Self {
-        Self(1.0)
+        Self(10.0)
     }
 }
 
@@ -395,24 +398,50 @@ pub(crate) fn bee_speed_controls(keys: Res<ButtonInput<KeyCode>>, mut speed: Res
     }
 }
 
-/// Bees periodically choose a random flower in range, gather from it, then
-/// add one tile to a planned hive. When a built black entrance exists, a bee
-/// sometimes enters it and remains inside for a short random interval.
+impl HiveState {
+    /// Index of the unfinished hive closest to `from`.
+    fn closest_unfinished(&self, from: IVec2) -> Option<usize> {
+        self.hives
+            .iter()
+            .enumerate()
+            .filter(|(_, hive)| hive.built.len() < hive.plan.len())
+            .min_by_key(|(_, hive)| (hive.origin - from).length_squared())
+            .map(|(index, _)| index)
+    }
+}
+
+/// Teleports a bee to a random entrance of `hive` and hides it inside.
+fn enter_hive(bee: &mut Bee, transform: &mut Transform, index: usize, hive: &Hive, rng: &mut impl RngExt) {
+    let entrances: Vec<_> = hive.black.iter().copied().collect();
+    let entrance = entrances[rng.random_range(0..entrances.len())];
+    bee.grid = entrance;
+    bee.inside_hive = Some(index);
+    bee.hive_timer = rng.random_range(1.0..=5.0);
+    transform.translation = Vec3::new(
+        entrance.x as f32 * CELLSIZE,
+        entrance.y as f32 * CELLSIZE,
+        INSIDE_HIVE_Z,
+    );
+}
+
 pub(crate) fn bee_foraging_and_building(
     mut commands: Commands,
     time: Res<Time>,
     speed: Res<BeeSpeed>,
     environment: Res<Environment>,
-    flowers: Query<(&PCell, &PCellRole)>,
+    mut flowers: Query<(Entity, &PCell, &mut PCellRole, Has<Pollinated>)>,
     mut bee_queries: ParamSet<(Query<(&mut Bee, &mut Transform)>, Query<&mut Sprite>)>,
     mut state: ResMut<HiveState>,
 ) {
     let mut rng = rand::rng();
     let flower_positions: Vec<IVec2> = flowers
         .iter()
-        .filter_map(|(cell, role)| matches!(*role, PCellRole::Flower(_)).then_some(cell.grid))
+        .filter_map(|(_, cell, role, polld)| {
+            (matches!(*role, PCellRole::Flower(_)) && !polld).then_some(cell.grid)
+        })
         .collect();
-    let range_squared = i64::from(BEE_RANGE).pow(2);
+    let range_squared = BEE_RANGE.pow(2) as i64;
+    let mut gathered: Vec<IVec2> = Vec::new();
 
     {
         let mut bees = bee_queries.p0();
@@ -420,27 +449,17 @@ pub(crate) fn bee_foraging_and_building(
             let dt = time.delta_secs() * speed.0;
 
             if state.active_hive.is_none() {
-                state.active_hive = state
-                    .hives
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, hive)| hive.built.len() < hive.plan.len())
-                    .min_by_key(|(_, hive)| {
-                        let d = hive.origin - bee.grid;
-                        d.x * d.x + d.y * d.y
-                    })
-                    .map(|(index, _)| index);
+                state.active_hive = state.closest_unfinished(bee.grid);
             }
 
             if bee.inside_hive.is_some() {
                 bee.hive_timer -= dt;
-                transform.translation.z = INSIDE_HIVE_Z;
-                if bee.hive_timer <= 0.0 {
-                    bee.inside_hive = None;
-                    transform.translation.z = BEE_Z;
-                } else {
+                if bee.hive_timer > 0.0 {
+                    transform.translation.z = INSIDE_HIVE_Z;
                     continue;
                 }
+                bee.inside_hive = None;
+                transform.translation.z = BEE_Z;
             }
 
             bee.entrance_cooldown -= dt;
@@ -452,91 +471,68 @@ pub(crate) fn bee_foraging_and_building(
                 && !hive.black.is_empty()
                 && rng.random_bool((dt * 0.35).clamp(0.0, 0.35) as f64)
             {
-                let entrances: Vec<_> = hive.black.iter().copied().collect();
-                let entrance = entrances[rng.random_range(0..entrances.len())];
-                bee.grid = entrance;
-                bee.inside_hive = Some(index);
-                bee.hive_timer = rng.random_range(1.0..=5.0);
+                enter_hive(&mut bee, &mut transform, index, hive, &mut rng);
                 bee.entrance_cooldown = 2.0;
-                transform.translation.x = entrance.x as f32 * CELLSIZE;
-                transform.translation.y = entrance.y as f32 * CELLSIZE;
-                transform.translation.z = INSIDE_HIVE_Z;
                 continue;
             }
 
             // After gathering, walk to the exact planned tile before building it.
-            if let Some((index, target)) = bee.hive_target {
-                if bee.grid == target {
-                    bee.hive_target = None;
-                    let mut finished_origin = None;
-                    if let Some(hive) = state.hives.get_mut(index) {
-                        if let Some(position) = hive.grow(&mut rng) {
-                            let entity = commands
-                                .spawn((
-                                    Sprite::from_color(hive.color(position), Vec2::splat(CELLSIZE)),
-                                    Transform::from_xyz(
-                                        position.x as f32 * CELLSIZE,
-                                        position.y as f32 * CELLSIZE,
-                                        HIVE_Z,
-                                    ),
-                                ))
-                                .id();
-                            hive.entities.insert(position, entity);
-                        }
-                        if !hive.black.is_empty() && rng.random_bool(0.35) {
-                            let entrances: Vec<_> = hive.black.iter().copied().collect();
-                            let entrance = entrances[rng.random_range(0..entrances.len())];
-                            bee.grid = entrance;
-                            bee.inside_hive = Some(index);
-                            bee.hive_timer = rng.random_range(1.0..=5.0);
-                            transform.translation.x = entrance.x as f32 * CELLSIZE;
-                            transform.translation.y = entrance.y as f32 * CELLSIZE;
-                            transform.translation.z = INSIDE_HIVE_Z;
-                        }
-                        if hive.built.len() >= hive.plan.len() {
-                            finished_origin = Some(hive.origin);
-                        }
+            if let Some((index, target)) = bee.hive_target
+                && bee.grid == target
+            {
+                bee.hive_target = None;
+                let mut finished_origin = None;
+                if let Some(hive) = state.hives.get_mut(index) {
+                    if let Some(position) = hive.grow(&mut rng) {
+                        let entity = commands
+                            .spawn((
+                                Sprite::from_color(hive.color(position), Vec2::splat(CELLSIZE)),
+                                Transform::from_xyz(
+                                    position.x as f32 * CELLSIZE,
+                                    position.y as f32 * CELLSIZE,
+                                    HIVE_Z,
+                                ),
+                            ))
+                            .id();
+                        hive.entities.insert(position, entity);
                     }
-                    if let Some(origin) = finished_origin {
-                        state.active_hive = state
-                            .hives
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, hive)| hive.built.len() < hive.plan.len())
-                            .min_by_key(|(_, hive)| {
-                                let d = hive.origin - origin;
-                                d.x * d.x + d.y * d.y
-                            })
-                            .map(|(next, _)| next);
+                    if !hive.black.is_empty() && rng.random_bool(0.35) {
+                        enter_hive(&mut bee, &mut transform, index, hive, &mut rng);
                     }
-                    continue;
+                    if hive.built.len() >= hive.plan.len() {
+                        finished_origin = Some(hive.origin);
+                    }
                 }
+                if let Some(origin) = finished_origin {
+                    state.active_hive = state.closest_unfinished(origin);
+                }
+                continue;
             }
 
             // Reaching a flower starts a short gathering period.
-            if let Some(target) = bee.target {
-                if target == bee.grid {
-                    if bee.gather_timer <= 0.0 {
-                        bee.gather_timer = rng.random_range(0.8..=2.0);
-                    }
-                    bee.gather_timer -= dt;
-                    if bee.gather_timer <= 0.0 {
-                        bee.target = None;
-                        bee.flower_cooldown = rng.random_range(1.0..=3.0);
-                        bee.flowers_collected += 1;
-                        if bee.flowers_collected >= 5 {
-                            bee.flowers_collected = 0;
-                            if let Some(index) = state.active_hive {
-                                if let Some(hive) = state.hives.get_mut(index) {
-                                    if let Some(position) = hive.next_build_target(bee.grid) {
-                                        bee.hive_target = Some((index, position));
-                                    }
-                                }
-                            }
+            if let Some(target) = bee.target
+                && target == bee.grid
+            {
+                if bee.gather_timer <= 0.0 {
+                    bee.gather_timer = rng.random_range(0.8..=2.0);
+                }
+                bee.gather_timer -= dt;
+                if bee.gather_timer <= 0.0 {
+                    gathered.push(target);
+                    bee.target = None;
+                    bee.flower_cooldown = rng.random_range(1.0..=3.0);
+                    bee.flowers_collected += 1;
+                    if bee.flowers_collected >= 5 {
+                        bee.flowers_collected = 0;
+                        if let Some(index) = state.active_hive
+                            && let Some(hive) = state.hives.get_mut(index)
+                            && let Some(position) = hive.next_build_target(bee.grid)
+                        {
+                            bee.hive_target = Some((index, position));
                         }
                     }
-                    continue;
                 }
+                continue;
             }
 
             bee.flower_cooldown -= dt;
@@ -544,39 +540,32 @@ pub(crate) fn bee_foraging_and_building(
             if bee.flower_cooldown <= 0.0 && (bee.target.is_none() || rng.random_bool(0.08)) {
                 let nearby: Vec<_> = flower_positions
                     .iter()
-                    .copied()
-                    .filter_map(|p| {
+                    .filter_map(|&p| {
                         let d = p - bee.grid;
                         let squared = i64::from(d.x).pow(2) + i64::from(d.y).pow(2);
                         (squared <= range_squared).then_some((p, (squared as f32).sqrt()))
                     })
                     .collect();
-                let closest_distance = nearby
-                    .iter()
-                    .map(|(_, distance)| *distance)
-                    .fold(f32::INFINITY, f32::min);
-                // Keep the target random, but within 20 tiles of the closest
-                // available flower's distance from this bee.
+                let closest = nearby.iter().map(|&(_, d)| d).fold(f32::INFINITY, f32::min);
+                // random target, but within 20 tiles of closest flowers distance
                 let choices: Vec<_> = nearby
                     .into_iter()
-                    .filter(|(_, distance)| *distance <= closest_distance + 20.0)
+                    .filter(|&(_, d)| d <= closest + 20.0)
                     .map(|(p, _)| p)
                     .collect();
-                bee.target = choices
-                    .get(rng.random_range(0..choices.len().max(1)))
-                    .copied();
+                bee.target = choices.choose(&mut rng).copied();
                 if bee.target.is_some() {
                     bee.flower_cooldown = rng.random_range(1.5..=4.0);
                 }
             }
 
-            // Consume all elapsed movement intervals, capped to avoid a runaway
-            // loop at very high speed.
-            let mut moves = 0;
-            while bee.timer <= 0.0 && moves < 64 {
+            // movement
+            for _ in 0..64 {
+                if bee.timer > 0.0 {
+                    break;
+                }
                 bee.timer += 0.2;
-                let next_target = bee.hive_target.map(|(_, target)| target).or(bee.target);
-                let next = match next_target {
+                let next = match bee.hive_target.map(|(_, t)| t).or(bee.target) {
                     Some(target) => {
                         let delta = target - bee.grid;
                         if delta.x.abs() >= delta.y.abs() {
@@ -586,8 +575,8 @@ pub(crate) fn bee_foraging_and_building(
                         }
                     }
                     None => {
-                        let directions = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
-                        bee.grid + directions[rng.random_range(0..directions.len())]
+                        let dirs = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
+                        bee.grid + dirs[rng.random_range(0..dirs.len())]
                     }
                 };
                 if environment.inside(next) {
@@ -595,14 +584,32 @@ pub(crate) fn bee_foraging_and_building(
                     transform.translation.x = next.x as f32 * CELLSIZE;
                     transform.translation.y = next.y as f32 * CELLSIZE;
                 }
-                moves += 1;
             }
         }
     }
 
-    // Keep the complete blueprint visible, but reveal black entrances only
-    // after their built-tile constraints are satisfied.
+
+    // turn flower used
+    // if !gathered.is_empty() {
+    //     for (entity, cell, mut role) in &mut flowers {
+    //         if gathered.contains(&cell.grid) && matches!(*role, PCellRole::Flower(_)) {
+    //             *role = PCellRole::Flower(FLOWERWHITE);
+    //             if let Ok(mut sprite) = sprites.get_mut(entity) {
+    //                 sprite.color = role.color();
+    //             }
+    //         }
+    //     }
+    // }
+
+    for (entity, cell, role, _) in &flowers {
+        if gathered.contains(&cell.grid) && matches!(*role, PCellRole::Flower(_)) {
+            commands.entity(entity).insert(Pollinated);
+        }
+    }
     let mut sprites = bee_queries.p1();
+
+
+    // reveal back entrances
     for hive in &state.hives {
         for (&position, &entity) in &hive.entities {
             if let Ok(mut sprite) = sprites.get_mut(entity) {
