@@ -9,6 +9,29 @@ use rand::RngExt;
 use rand::rng;
 
 const CELLSIZE: f32 = 5.0;
+const SLANT: f64 = 0.35;
+const WIND_SPEED: f64 = 0.005;
+const SWAY: f64 = 0.03;
+const NSCALE: f64 = 0.005;
+
+
+#[derive(Resource)]
+struct LightNoise(OpenSimplex);
+fn light_value(n: &OpenSimplex, x: i32, y: i32, t: f64) -> f64 {
+    let wx = x as f64 * CELLSIZE as f64 * NSCALE + 500.37;
+    let wy = y as f64 * CELLSIZE as f64 * NSCALE + 500.91;
+    let sx = wx
+        + wy * SLANT
+        + t * WIND_SPEED
+        + (t * 0.7 + wy * 3.0).sin() * SWAY;
+    n.get([sx, wy])
+}
+fn shade(l: f64) -> f32 {
+    let s = ((0.1 - l) / 0.2).clamp(0.0, 1.0);
+    let s = s * s * (3.0 - 2.0 * s);
+    let light01 = (l + 1.0) / 2.0;
+    (s * (1.0 - 0.5 * light01)) as f32
+}
 
 #[derive(Clone,Copy)]
 struct TileEnvironment {
@@ -43,7 +66,7 @@ impl Environment {
 struct DirtTile;
 
 #[derive(Component)]
-struct LightTile;
+struct LightTile {grid: IVec2}
 
 #[derive(Component)]
 #[require(Sprite = default_sprite(), Transform = origin_transform())]
@@ -59,11 +82,34 @@ fn origin_transform() -> Transform {
     Transform::from_xyz(0.0, 0.0, 0.0)
 }
 
+fn animate_light(
+    time: Res<Time>,
+    noise: Res<LightNoise>,
+    mut env: ResMut<Environment>,
+    mut tiles: Query<(&LightTile, &mut Sprite)>,
+) {
+    let t = time.elapsed_secs_f64();
+    let env = &mut *env;
+    for (tile, mut sprite) in &mut tiles {
+        let l = light_value(&noise.0, tile.grid.x, tile.grid.y, t);
+        if l > 0.4 {
+            sprite.color = Color::srgba(1.0,1.0,0.0, 0.01*l as f32);
+        } else {
+            sprite.color = Color::srgba(0.0, 0.0, 0.0, shade(l));
+        }
+        if let Some(e) = env.tiles.get_mut(&tile.grid) {
+            e.light = ((l + 1.0)/2.0) as f32;
+            e.sun = l > 0.0
+        }
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         // .insert_resource(Environment {sun: true, dirt: false})
         .insert_resource(Occupied::default())
+        .add_systems(Update, (animate_light))
         .add_systems(Startup, setup)
         .add_systems(Update, (update_cells,grow_cells,check_suffocation).chain())
         .run();
@@ -82,9 +128,8 @@ fn setup(mut commands: Commands, mut occupied: ResMut<Occupied>, window: Single<
         max: IVec2::new(hx,hy)
     };
 
-    const NSCALE: f64 = 0.005;
 
-    let sperlin = OpenSimplex::new(21345);
+    let lnoise = OpenSimplex::new(21345);
     let dperlin = OpenSimplex::new(68292);
 
     for x in env.min.x..=env.max.x {
@@ -95,17 +140,15 @@ fn setup(mut commands: Commands, mut occupied: ResMut<Occupied>, window: Single<
             let wx = x as f64 * CELLSIZE as f64 * NSCALE;
             let wy = y as f64 * CELLSIZE as f64 * NSCALE;
 
-            let lval = sperlin.get([
-                wx,
-                wy,
-            ]);
+            let lval = light_value(&lnoise,x,y,0.0);
 
             let light = ((lval + 1.0)/2.0) as f32;
             let sun = lval > 0.0;
 
-            let dirt = dperlin.get([
+            let dval = dperlin.get([
                 wx, wy
-            ]) < 0.0;
+            ]);
+            let dirt = dval > 0.2;
 
             env.tiles.insert(
                 grid_pos,
@@ -118,7 +161,7 @@ fn setup(mut commands: Commands, mut occupied: ResMut<Occupied>, window: Single<
                 commands.spawn((
                     DirtTile,
                     Sprite::from_color(
-                        Color::srgb(0.35,0.2,0.08),
+                        Color::srgba(0.35,0.2,0.08,1.0-0.1*(dval as f32 +1.0)/2.0),
                         Vec2::splat(CELLSIZE)
                     ),
                     Transform::from_translation(
@@ -127,18 +170,16 @@ fn setup(mut commands: Commands, mut occupied: ResMut<Occupied>, window: Single<
                 ));
             }
 
-            if !sun {
-                commands.spawn((
-                    LightTile,
-                    Sprite::from_color(
-                        Color::srgba(0.0,0.0,0.0,1.0-0.5*light),
-                        Vec2::splat(CELLSIZE)
-                    ),
-                    Transform::from_translation(
-                        pos + Vec3::Z
-                    )
-                ));
-            }
+            commands.spawn((
+                LightTile {grid: grid_pos},
+                Sprite::from_color(
+                    Color::srgba(0.0,0.0,0.0,shade(lval)),
+                    Vec2::splat(CELLSIZE),
+                ),
+                Transform::from_translation(
+                    pos + Vec3::Z
+                )
+            ));
         }
     }
 
@@ -180,6 +221,6 @@ fn setup(mut commands: Commands, mut occupied: ResMut<Occupied>, window: Single<
 
         roots_spawned += 1;
     }
-
+    commands.insert_resource(LightNoise(lnoise));
     commands.insert_resource(env);
 }

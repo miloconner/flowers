@@ -1,7 +1,12 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
+use rand::RngExt;
+use rand::rng;
 
 use crate::{Environment, CELLSIZE};
+
+const BRANCE: f64 = 0.15;
+const RANCE: f64 = 0.1;
 
 #[derive(Resource, Default)]
 pub struct Occupied {pub positions: HashSet<IVec2>}
@@ -34,6 +39,15 @@ impl PCellRole {
     }
 }
 
+fn pcell_bundle(role: PCellRole, position: Vec2, grid:IVec2, blocker: bool) -> impl Bundle {
+    (
+        PCell { grid, growth: 0.0, target: None, blocker},
+        role,
+        Sprite::from_color(role.color(), Vec2::splat(CELLSIZE)),
+        Transform::from_xyz(position.x, position.y, 0.0)
+    )
+}
+
 pub fn spawn_pcell(
     parent: &mut ChildSpawnerCommands,
     role: PCellRole,
@@ -43,12 +57,7 @@ pub fn spawn_pcell(
     blocker: bool
 ) {
     occupied.positions.insert(grid_pos);
-    parent.spawn((
-        PCell { grid: grid_pos, growth: 0.0, target: None, blocker },
-        role,
-        Sprite::from_color(role.color(), Vec2::new(CELLSIZE,CELLSIZE)),
-        Transform::from_xyz(position.x, position.y, 0.0),
-    ));
+    parent.spawn(pcell_bundle(role,position,grid_pos,blocker));
 }
 
 pub fn grow_cells(
@@ -58,6 +67,7 @@ pub fn grow_cells(
     mut cells: Query<(Entity, &mut PCell, &mut PCellRole)>,
     mut occupied: ResMut<Occupied>
 ) {
+    let mut rng = rng();
     for (entity, mut cell, mut role) in &mut cells {
         cell.growth += time.delta_secs();
         if cell.blocker {
@@ -80,8 +90,16 @@ pub fn grow_cells(
         let t_env = environment.get(target);
         let child_role = match *role {
             PCellRole::Root => Some(PCellRole::Leaf),
-            PCellRole::Stem => if !t_env.sun && t_env.dirt {
-                Some(PCellRole::Root)
+            PCellRole::Stem => if  t_env.dirt {
+                if !t_env.sun {
+                    Some(PCellRole::Root)
+                } else {
+                    if !rng.random_bool(RANCE) {
+                        Some(PCellRole::Root)
+                    } else {
+                        None
+                    }
+                }
             } else {
                 None
             }
@@ -95,19 +113,32 @@ pub fn grow_cells(
         let offset = (target - curr).as_vec2() * CELLSIZE as f32;
 
         cell.growth = 0.0;
-        commands.entity(entity).with_children(|parent| {
-            spawn_pcell(
-                parent,
+        if child_role == PCellRole::Root {
+            occupied.positions.insert(target);
+            commands.spawn(pcell_bundle(
                 child_role,
-                offset,
+                target.as_vec2() * CELLSIZE, // world position
                 target,
-                &mut occupied,
-                false
-            );
-        });
+                false,
+            ));
+        } else {
+            commands.entity(entity).with_children(|parent| {
+                spawn_pcell(
+                    parent,
+                    child_role,
+                    offset,
+                    target,
+                    &mut occupied,
+                    false
+                );
+            });
+        }
+        
 
-        if *role == PCellRole::Leaf {
-            *role = PCellRole::Stem;
+        if !rng.random_bool(BRANCE) {
+            if *role == PCellRole::Leaf {
+                *role = PCellRole::Stem;
+            }
         }
     }
 }
@@ -169,15 +200,18 @@ pub fn update_cells(
 pub fn check_suffocation(
     mut commands: Commands,
     mut occupied: ResMut<Occupied>,
-    mut cells: Query<(Entity, &PCell, &mut PCellRole, &ChildOf)>,
+    mut cells: Query<(Entity, &PCell, &mut PCellRole)>,
     children_query: Query<&Children>,
     child_of_query: Query<&ChildOf>,
 ) {
     let mut to_kill = Vec::new();
-    for (entity, cell, role, child_of) in cells.iter() {
+    for (entity, cell, role) in cells.iter() {
         if *role != PCellRole::Stem {
             continue;
         }
+        let Ok(child_of) = child_of_query.get(entity) else {
+            continue;
+        };
         let curr = cell.grid;
         let neighbors = [
             curr + IVec2::new(0, 1),
@@ -195,20 +229,20 @@ pub fn check_suffocation(
         if child_of_query.iter_ancestors(entity).any(|a| kill_set.contains(&a)) {
             continue;
         }
-        let Ok(parent_grid) = cells.get(parent).map(|(_, c, _, _)| c.grid) else {
+        let Ok(parent_grid) = cells.get(parent).map(|(_, c, _)| c.grid) else {
             continue;
         };
 
         occupied.positions.remove(&grid);
         for d in children_query.iter_descendants(entity) {
-            if let Ok((_, c, _, _)) = cells.get(d) {
+            if let Ok((_, c, _)) = cells.get(d) {
                 occupied.positions.remove(&c.grid);
             }
         }
 
         commands.entity(entity).despawn();
 
-        if let Ok((_, _, mut p_role, _)) = cells.get_mut(parent) {
+        if let Ok((_, _, mut p_role)) = cells.get_mut(parent) {
             if *p_role != PCellRole::Root {
                 *p_role = PCellRole::Leaf;
             }
