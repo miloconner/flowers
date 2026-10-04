@@ -1,11 +1,14 @@
 mod cells;
 
 use bevy::prelude::*;
-use std::collections::{HashMap, HashSet};
-use noise::{NoiseFn, Perlin};
+use bevy::window::PrimaryWindow;
+use std::collections::{HashMap};
+use noise::{NoiseFn, OpenSimplex};
 use cells::*;
+use rand::RngExt;
+use rand::rng;
 
-const CELLSIZE: f32 = 20.0;
+const CELLSIZE: f32 = 5.0;
 
 #[derive(Clone,Copy)]
 struct TileEnvironment {
@@ -15,7 +18,11 @@ struct TileEnvironment {
 }
 
 #[derive(Resource, Default)]
-struct Environment {tiles: HashMap<IVec2, TileEnvironment>}
+struct Environment {
+    tiles: HashMap<IVec2, TileEnvironment>,
+    min: IVec2,
+    max: IVec2
+}
 impl Environment {
     fn get(&self, position: IVec2) -> TileEnvironment {
         self.tiles
@@ -26,6 +33,9 @@ impl Environment {
                 sun: false,
                 dirt: false,
             })
+    }
+    fn inside(&self, p: IVec2) -> bool {
+        p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
     }
 }
 
@@ -55,35 +65,46 @@ fn main() {
         // .insert_resource(Environment {sun: true, dirt: false})
         .insert_resource(Occupied::default())
         .add_systems(Startup, setup)
-        .add_systems(Update, (update_cells,grow_cells).chain())
+        .add_systems(Update, (update_cells,grow_cells,check_suffocation).chain())
         .run();
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut occupied: ResMut<Occupied>, window: Single<&Window, With<PrimaryWindow>>) {
     commands.spawn(Camera2d);
-    commands.spawn(Organism);
+    // commands.spawn(Organism);
 
-    let mut env = Environment::default();
+    let hx = (window.width() / CELLSIZE / 2.0).ceil() as i32;
+    let hy = (window.height() / CELLSIZE / 2.0).ceil() as i32;
 
-    let sperlin = Perlin::new(1);
-    let dperlin = Perlin::new(2);
+    let mut env = Environment{
+        tiles: HashMap::new(),
+        min: IVec2::new(-hx,-hy),
+        max: IVec2::new(hx,hy)
+    };
 
-    for x in -20..20 {
-        for y in -20..20 {
+    const NSCALE: f64 = 0.005;
+
+    let sperlin = OpenSimplex::new(21345);
+    let dperlin = OpenSimplex::new(68292);
+
+    for x in env.min.x..=env.max.x {
+        for y in env.min.y..=env.max.y {
             let grid_pos = IVec2::new(x,y);
             let pos = Vec3::new(x as f32 * CELLSIZE, y as f32 * CELLSIZE,0.0);
             
+            let wx = x as f64 * CELLSIZE as f64 * NSCALE;
+            let wy = y as f64 * CELLSIZE as f64 * NSCALE;
+
             let lval = sperlin.get([
-                x as f64 * 0.1,
-                y as f64 * 0.1,
+                wx,
+                wy,
             ]);
 
             let light = ((lval + 1.0)/2.0) as f32;
             let sun = lval > 0.0;
 
             let dirt = dperlin.get([
-                x as f64 * 0.1,
-                y as f64 * 0.1,
+                wx, wy
             ]) < 0.0;
 
             env.tiles.insert(
@@ -120,11 +141,45 @@ fn setup(mut commands: Commands) {
             }
         }
     }
-    commands.insert_resource(env);
 
-    commands
-        .spawn((Plant, Transform::from_xyz(-240.0, -80.0, 0.0)))
-        .with_children(|plant| {
-            spawn_pcell(plant, PCellRole::Root,Vec2::ZERO);
-        });
+    let mut rng = rng();
+    let mut roots_spawned = 0;
+
+    while roots_spawned < 10 {
+        let root_pos = IVec2::new(
+            rng.random_range(env.min.x..=env.max.x),
+            rng.random_range(env.min.y..=env.max.y)
+        );
+
+        if !env.get(root_pos).dirt || occupied.positions.contains(&root_pos) {
+            continue;
+        }
+
+        let world_pos = Vec3::new(
+            root_pos.x as f32 * CELLSIZE,
+            root_pos.y as f32 * CELLSIZE,
+            0.0,
+        );
+
+        commands
+            .spawn((
+                Plant,
+                Transform::from_translation(world_pos),
+                Visibility::default()
+            ))
+            .with_children(|plant| {
+                spawn_pcell(
+                    plant,
+                    PCellRole::Root,
+                    Vec2::ZERO,
+                    root_pos,
+                    &mut occupied,
+                    false,
+                );
+            });
+
+        roots_spawned += 1;
+    }
+
+    commands.insert_resource(env);
 }
