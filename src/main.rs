@@ -1,4 +1,5 @@
 mod cells;
+mod hives;
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -29,9 +30,7 @@ const ORGANISM_COLOR: Color = Color::srgb(0.2, 0.7, 1.0);
 const DIRT_COLOR: Color = Color::srgb(0.35, 0.2, 0.08);
 const SUNLIGHT_COLOR: Color = Color::srgb(1.0, 1.0, 0.0);
 const SHADOW_COLOR: Color = Color::srgb(0.0, 0.0, 0.0);
-const RAIN_SPLASH_COLOR: Color = Color::srgb(0.15, 0.55, 1.0);const BEERANGE: i32 = 15;
-
-
+const RAIN_SPLASH_COLOR: Color = Color::srgb(0.15, 0.55, 1.0);
 
 #[derive(Resource)]
 struct LightNoise(OpenSimplex);
@@ -75,6 +74,7 @@ struct Environment {
     min: IVec2,
     max: IVec2,
 }
+
 impl Environment {
     fn get(&self, position: IVec2) -> TileEnvironment {
         self.tiles
@@ -86,6 +86,7 @@ impl Environment {
                 dirt: false,
             })
     }
+
     fn inside(&self, p: IVec2) -> bool {
         p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
     }
@@ -106,70 +107,6 @@ struct WaterTile;
 #[require(Sprite = default_sprite(), Transform = origin_transform())]
 pub struct Organism;
 
-#[derive(Component)]
-pub struct Bee {pub grid: IVec2, target: Option<IVec2>, timer: f32}
-
-pub fn spawn_bee(commands: &mut Commands, grid: IVec2) {
-    commands.spawn((
-        Bee { grid, target: None, timer: 0.0},
-        Sprite::from_color(Color::srgb(1.0, 0.85, 0.1), Vec2::splat(CELLSIZE * 0.6)),
-        Transform::from_xyz(grid.x as f32 * CELLSIZE, grid.y as f32 * CELLSIZE, 1.5),
-    ));
-}
-
-pub fn update_bees(
-    time: Res<Time>,
-    environment: Res<Environment>,
-    cells: Query<(&PCell, &PCellRole)>,
-    mut bees: Query<(&mut Bee, &mut Transform)>
-) {
-    let mut rng = rng();
-    for (mut bee, mut tf) in &mut bees {
-        bee.timer += time.delta_secs();
-        if bee.timer < 0.25 {
-            continue;
-        }
-        bee.timer = 0.0;
-        let mut closest = i32::MAX;
-        bee.target = None;
-        for (cell, role) in &cells {
-            if !matches!(*role, PCellRole::Flower(_)) {
-                continue;
-            }
-            let dis = cell.grid - bee.grid;
-            let dist = dis.x.abs() + dis.y.abs();
-
-            if dist <= BEERANGE && dist < closest {
-                closest = dist;
-                bee.target = Some(cell.grid);
-            }
-        }
-
-        let mv = match bee.target {
-            Some(t) if t == bee.grid => bee.grid,
-            Some(t) => {
-                let d = t - bee.grid;
-                if d.x.abs() >= d.y.abs() {
-                    bee.grid + IVec2::new(d.x.signum(), 0)
-                } else {
-                    bee.grid + IVec2::new(0,d.y.signum())
-                }
-            }
-            None => {
-                let dirs = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
-                bee.grid + dirs[rng.random_range(0..dirs.len())]
-            }
-        };
-
-        if environment.inside(mv) {
-            bee.grid = mv;
-        }
-        tf.translation.x = bee.grid.x as f32 * CELLSIZE;
-        tf.translation.y = bee.grid.y as f32 * CELLSIZE;
-
-    }
-}
-
 fn default_sprite() -> Sprite {
     Sprite::from_color(ORGANISM_COLOR, Vec2::splat(100.0))
 }
@@ -186,16 +123,19 @@ fn animate_light(
 ) {
     let t = time.elapsed_secs_f64();
     let env = &mut *env;
+
     for (tile, mut sprite) in &mut tiles {
         let l = light_value(&noise.0, tile.grid.x, tile.grid.y, t);
+
         if l > 0.4 {
             sprite.color = SUNLIGHT_COLOR.with_alpha(0.01 * l as f32);
         } else {
             sprite.color = SHADOW_COLOR.with_alpha(shade(l));
         }
+
         if let Some(e) = env.tiles.get_mut(&tile.grid) {
             e.light = ((l + 1.0) / 2.0) as f32;
-            e.sun = l > SUN_THRESHOLD
+            e.sun = l > SUN_THRESHOLD;
         }
     }
 }
@@ -210,6 +150,7 @@ fn spawn_rain_splashes(
 ) {
     clock.elapsed += time.delta_secs();
     let now = time.elapsed_secs_f64();
+
     let rainy_positions: Vec<_> = light_tiles
         .iter()
         .filter_map(|tile| {
@@ -217,28 +158,37 @@ fn spawn_rain_splashes(
                 .then_some(tile.grid)
         })
         .collect();
+
     if rainy_positions.is_empty() {
         clock.elapsed = clock.elapsed.min(RAIN_SPLASH_ROLL_INTERVAL);
         return;
     }
 
     let mut rng = rng();
+
     while clock.elapsed >= RAIN_SPLASH_ROLL_INTERVAL {
         clock.elapsed -= RAIN_SPLASH_ROLL_INTERVAL;
+
         for &origin in &rainy_positions {
             if !rng.random_bool(RAIN_SPLASH_CHANCE_PER_TILE_PER_ROLL) {
                 continue;
             }
+
             let offsets: &[IVec2] = match rng.random_range(0..3) {
                 0 => &[IVec2::ZERO],
+
                 1 => &[IVec2::ZERO, IVec2::X, IVec2::Y, IVec2::ONE],
+
                 _ => &[IVec2::ZERO, IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y],
             };
+
             for &offset in offsets {
                 let position = origin + offset;
+
                 if !environment.inside(position) {
                     continue;
                 }
+
                 *water.amounts.entry(position).or_default() += RAIN_WATER_AMOUNT;
             }
         }
@@ -253,15 +203,19 @@ fn update_water(
     mut water_tiles: Query<&mut Sprite, With<WaterTile>>,
 ) {
     water.elapsed += time.delta_secs();
+
     while water.elapsed >= WATER_UPDATE_INTERVAL {
         water.elapsed -= WATER_UPDATE_INTERVAL;
+
         let snapshot = water.amounts.clone();
+
         let mut changes: HashMap<IVec2, f32> = HashMap::new();
 
         for (&position, &amount) in &snapshot {
             if amount < WATER_MIN_SPREAD_AMOUNT {
                 continue;
             }
+
             let neighbors: Vec<_> = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y]
                 .into_iter()
                 .map(|offset| position + offset)
@@ -270,12 +224,17 @@ fn update_water(
                         && snapshot.get(neighbor).copied().unwrap_or_default() < amount
                 })
                 .collect();
+
             if neighbors.is_empty() {
                 continue;
             }
+
             let total_spread = amount * WATER_SPREAD_FRACTION_PER_TICK;
+
             let per_neighbor = total_spread / neighbors.len() as f32;
+
             *changes.entry(position).or_default() -= total_spread;
+
             for neighbor in neighbors {
                 *changes.entry(neighbor).or_default() += per_neighbor;
             }
@@ -284,17 +243,21 @@ fn update_water(
         for (position, change) in changes {
             *water.amounts.entry(position).or_default() += change;
         }
+
         for amount in water.amounts.values_mut() {
             *amount = (*amount - WATER_EVAPORATION_PER_TICK).max(0.0);
         }
+
         water
             .amounts
             .retain(|_, amount| *amount >= WATER_MIN_AMOUNT);
     }
 
     let old_positions: Vec<_> = water.entities.keys().copied().collect();
+
     for position in old_positions {
         let entity = water.entities[&position];
+
         if let Some(&amount) = water.amounts.get(&position) {
             if let Ok(mut sprite) = water_tiles.get_mut(entity) {
                 sprite.color =
@@ -313,6 +276,7 @@ fn update_water(
             (!water.entities.contains_key(&position)).then_some((position, amount))
         })
         .collect();
+
     for (position, amount) in new_positions {
         let entity = commands
             .spawn((
@@ -324,10 +288,11 @@ fn update_water(
                 Transform::from_xyz(
                     position.x as f32 * CELLSIZE,
                     position.y as f32 * CELLSIZE,
-                    3.0,
+                    1.0,
                 ),
             ))
             .id();
+
         water.entities.insert(position, entity);
     }
 }
@@ -339,19 +304,31 @@ fn main() {
         .insert_resource(Occupied::default())
         .insert_resource(RainClock::default())
         .insert_resource(WaterField::default())
-        .add_systems(Startup, setup)
+        .init_resource::<hives::HiveState>()
+        .init_resource::<hives::BeeSpeed>()
+        .add_systems(
+            Startup,
+            (
+                setup,
+                hives::generate_initial_hives,
+                hives::spawn_initial_bees,
+            )
+                .chain(),
+        )
+        .add_systems(Update, hives::spawn_bee_on_click)
         .add_systems(
             Update,
             (
                 animate_light,
                 spawn_rain_splashes,
                 update_water,
+                hives::bee_speed_controls,
                 update_cells,
                 grow_cells,
                 check_suffocation,
                 wilt_cells,
                 bloom_cells,
-                update_bees,
+                hives::bee_foraging_and_building,
             )
                 .chain(),
         )
@@ -364,9 +341,11 @@ fn setup(
     window: Single<&Window, With<PrimaryWindow>>,
 ) {
     commands.spawn(Camera2d);
+
     // commands.spawn(Organism);
 
     let hx = (window.width() / CELLSIZE / 2.0).ceil() as i32;
+
     let hy = (window.height() / CELLSIZE / 2.0).ceil() as i32;
 
     let mut env = Environment {
@@ -381,17 +360,21 @@ fn setup(
     for x in env.min.x..=env.max.x {
         for y in env.min.y..=env.max.y {
             let grid_pos = IVec2::new(x, y);
+
             let pos = Vec3::new(x as f32 * CELLSIZE, y as f32 * CELLSIZE, 0.0);
 
             let wx = x as f64 * CELLSIZE as f64 * NSCALE;
+
             let wy = y as f64 * CELLSIZE as f64 * NSCALE;
 
             let lval = light_value(&lnoise, x, y, 0.0);
 
             let light = ((lval + 1.0) / 2.0) as f32;
+
             let sun = lval > SUN_THRESHOLD;
 
             let dval = dperlin.get([wx, wy]);
+
             let dirt = dval > 0.2;
 
             env.tiles
@@ -411,7 +394,7 @@ fn setup(
             commands.spawn((
                 LightTile { grid: grid_pos },
                 Sprite::from_color(SHADOW_COLOR.with_alpha(shade(lval)), Vec2::splat(CELLSIZE)),
-                Transform::from_translation(pos + Vec3::Z),
+                Transform::from_xyz(pos.x, pos.y, 3.0),
             ));
         }
     }
@@ -455,14 +438,7 @@ fn setup(
         roots_spawned += 1;
     }
 
-    for _ in 0..5 {
-        let p = IVec2::new(
-            rng.random_range(env.min.x..=env.max.x),
-            rng.random_range(env.min.y..=env.max.y),
-        );
-        spawn_bee(&mut commands, p);
-    }
-
     commands.insert_resource(LightNoise(lnoise));
+
     commands.insert_resource(env);
 }

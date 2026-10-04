@@ -363,7 +363,7 @@ pub fn bloom_cells(
         match *role {
             PCellRole::Leaf => {
                 // Only sunlit time counts toward blooming, including blocking leaves.
-                if !environment.get(cell.grid).sun {
+                if CLOUD_KILLING && !environment.get(cell.grid).sun {
                     continue;
                 }
                 cell.leaf_age += time.delta_secs();
@@ -411,7 +411,9 @@ pub fn bloom_cells(
         for y in -1..=1 {
             for x in -1..=1 {
                 let position = center + IVec2::new(x, y);
-                if !environment.inside(position) || !environment.get(position).sun {
+                if !environment.inside(position)
+                    || (CLOUD_KILLING && !environment.get(position).sun)
+                {
                     continue;
                 }
                 // Reserve other centers, including leaves blooming this frame.
